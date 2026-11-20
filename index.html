@@ -391,18 +391,96 @@ function finish(stopped){cancelAnimationFrame(raf);playing=false;vtrack=null;S.i
 
 let wake=null;async function getWake(){try{wake=await navigator.wakeLock.request('screen')}catch(e){}}function releaseWake(){try{wake&&wake.release()}catch(e){}wake=null}
 function pickMime(){if(!window.MediaRecorder)return null;for(const m of['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'])if(MediaRecorder.isTypeSupported(m))return m;return''}
-function record(){const mime=pickMime();if(mime===null||!cv.captureStream){status('Bu tarayıcı video kaydını desteklemiyor. Telefonda Chrome veya Safari ile açmayı deneyebilirsiniz.');return}
+function recordRealtime(){const mime=pickMime();if(mime===null||!cv.captureStream){status('Bu tarayıcı video kaydını desteklemiyor. Telefonda Chrome veya Safari ile açmayı deneyebilirsiniz.');return}
  if(!S.items.length){status('Önce en az bir fotoğraf veya video ekleyebilirsiniz.');return}
  build();ensureAudio();let vs=cv.captureStream(0);vtrack=vs.getVideoTracks()[0];if(!vtrack||typeof vtrack.requestFrame!=='function'){vs.getTracks().forEach(x=>x.stop());vs=cv.captureStream(30);vtrack=null}const tracks=[...vs.getVideoTracks()];if(dest)tracks.push(...dest.stream.getAudioTracks());
  chunks=[];try{rec=new MediaRecorder(new MediaStream(tracks),{mimeType:mime||undefined,videoBitsPerSecond:W*H>1e6?8e6:4e6})}catch(e){rec=new MediaRecorder(new MediaStream(tracks))}
  rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
- rec.onstop=()=>{const type=rec.mimeType||mime||'video/webm';const blob=new Blob(chunks,{type});const ext=type.includes('mp4')?'mp4':'webm';const url=URL.createObjectURL(blob);
-  $('#outV').src=url;$('#dl').href=url;const name=(V('title')||'hatira-klibi').toLowerCase().replace(/[^a-z0-9çğıöşü]+/gi,'-')+'.'+ext;$('#dl').download=name;
-  $('#fmtNote').textContent=ext==='mp4'?'Dosya MP4 biçiminde; WhatsApp ve tüm telefonlarda açılır.':'Dosya WebM biçiminde kaydedildi. WhatsApp bazı telefonlarda bu biçimi göndermeyebilir; o durumda bir dönüştürme uygulamasıyla MP4 biçimine çevirebilirsiniz.';
-  const file=new File([blob],name,{type});const sh=$('#share');sh.hidden=!(navigator.canShare&&navigator.canShare({files:[file]}));sh.onclick=()=>navigator.share({files:[file],title:V('title')}).catch(()=>{});
-  $('#result').classList.add('on');status('Kayıt tamamlandı. Aşağıdan izleyip indirebilirsiniz.');$('#result').scrollIntoView({behavior:'smooth',block:'nearest'});rec=null};
+ rec.onstop=()=>{const type=rec.mimeType||mime||'video/webm';showResult(new Blob(chunks,{type}),type);rec=null};
  $('#result').classList.remove('on');getWake();
  if(start(true)){rec.start(500);status('Kaydediliyor… Lütfen ekranı açık tutunuz ('+fmtT(total)+' sürecek).')}else rec=null}
+
+function showResult(blob,type){const ext=type.includes('mp4')?'mp4':'webm';const url=URL.createObjectURL(blob);
+ $('#outV').src=url;$('#dl').href=url;const name=(V('title')||'hatira-klibi').toLowerCase().replace(/[^a-z0-9çğıöşü]+/gi,'-')+'.'+ext;$('#dl').download=name;
+ $('#fmtNote').textContent=ext==='mp4'?'Dosya MP4 biçiminde; WhatsApp ve tüm telefonlarda açılır.':'Dosya WebM biçiminde kaydedildi. WhatsApp bazı telefonlarda bu biçimi göndermeyebilir; o durumda bir dönüştürme uygulamasıyla MP4 biçimine çevirebilirsiniz.';
+ const file=new File([blob],name,{type});const sh=$('#share');sh.hidden=!(navigator.canShare&&navigator.canShare({files:[file]}));sh.onclick=()=>navigator.share({files:[file],title:V('title')}).catch(()=>{});
+ $('#result').classList.add('on');status('Video hazır. Aşağıdan izleyip indirebilir veya paylaşabilirsiniz.');$('#result').scrollIntoView({behavior:'smooth',block:'nearest'})}
+// ===== Donmasız kayıt: kare kare oluşturma (WebCodecs) + kendi MP4 paketleyicimiz =====
+const TE=new TextEncoder();
+function cat(ps){ps=ps.flat(Infinity);let n=0;for(const p of ps)n+=p.length;const o=new Uint8Array(n);let k=0;for(const p of ps){o.set(p,k);k+=p.length}return o}
+const u8=(...a)=>new Uint8Array(a),z=n=>new Uint8Array(n);
+const u16=n=>u8(n>>8&255,n&255),u32=n=>u8(n>>>24&255,n>>>16&255,n>>>8&255,n&255),str=s=>TE.encode(s);
+function BX(t,...ps){const b=cat(ps),o=new Uint8Array(8+b.length);new DataView(o.buffer).setUint32(0,o.length);o.set(str(t),4);o.set(b,8);return o}
+const FB=(t,v,f,...ps)=>BX(t,u32(((v<<24)|f)>>>0),...ps);
+const MTX=[0x00010000,0,0,0,0x00010000,0,0,0,0x40000000].map(u32);
+const DSC=(tag,ps)=>{const b=cat(ps);return cat([u8(tag,0x80,0x80,0x80,b.length&127),b])};
+function sttsBox(durs){const e=[];for(const d of durs){const l=e[e.length-1];if(l&&l[1]===d)l[0]++;else e.push([1,d])}return FB('stts',0,0,u32(e.length),e.map(([c,d])=>[u32(c),u32(d)]))}
+function trak(id,isA,o){const durMs=Math.round(o.total*1000);
+ const stsd=isA?FB('stsd',0,0,u32(1),BX('mp4a',z(6),u16(1),z(8),u16(o.ch),u16(16),z(4),u32(o.sr*65536),
+   FB('esds',0,0,DSC(3,[u16(2),u8(0),DSC(4,[u8(0x40,0x15,0,0,0),u32(o.br),u32(o.br),DSC(5,[o.desc])]),DSC(6,[u8(2)])]))))
+  :FB('stsd',0,0,u32(1),BX('avc1',z(6),u16(1),z(16),u16(o.w),u16(o.h),u32(0x00480000),u32(0x00480000),u32(0),u16(1),z(32),u16(24),u16(0xffff),BX('avcC',o.desc)));
+ const stbl=BX('stbl',stsd,sttsBox(o.durs),isA?[]:FB('stss',0,0,u32(o.keys.length),o.keys.map(u32)),
+  FB('stsc',0,0,u32(1),u32(1),u32(o.sizes.length),u32(1)),FB('stsz',0,0,u32(0),u32(o.sizes.length),o.sizes.map(u32)),FB('stco',0,0,u32(1),u32(o.off)));
+ const mdur=o.durs.reduce((a,b)=>a+b,0);
+ return BX('trak',FB('tkhd',0,3,z(8),u32(id),z(4),u32(durMs),z(8),u16(0),u16(0),u16(isA?0x0100:0),u16(0),MTX,u32((isA?0:o.w)*65536),u32((isA?0:o.h)*65536)),
+  BX('mdia',FB('mdhd',0,0,z(8),u32(o.ts),u32(mdur),u16(0x55c4),u16(0)),FB('hdlr',0,0,z(4),str(isA?'soun':'vide'),z(12),str((isA?'Sound':'Video')+'Handler\0')),
+   BX('minf',isA?FB('smhd',0,0,z(4)):FB('vmhd',0,1,z(8)),BX('dinf',FB('dref',0,0,u32(1),FB('url ',0,1))),stbl)))}
+function muxMP4(v,a,total){const ftyp=BX('ftyp',str('isom'),u32(512),str('isomiso2avc1mp41'));
+ const vb=v.chunks.reduce((s,c)=>s+c.length,0),ab=a?a.chunks.reduce((s,c)=>s+c.length,0):0;
+ const mdatH=cat([u32(8+vb+ab),str('mdat')]),voff=ftyp.length+8,aoff=voff+vb;
+ const moov=BX('moov',FB('mvhd',0,0,z(8),u32(1000),u32(Math.round(total*1000)),u32(0x00010000),u16(0x0100),z(10),MTX,z(24),u32(a?3:2)),
+  trak(1,false,{...v,total,off:voff,sizes:v.chunks.map(c=>c.length)}),a?trak(2,true,{...a,total,off:aoff,sizes:a.chunks.map(c=>c.length)}):[]);
+ return new Blob([ftyp,mdatH,...v.chunks,...(a?a.chunks:[]),moov],{type:'video/mp4'})}
+const toU8=d=>d instanceof Uint8Array?d:ArrayBuffer.isView(d)?new Uint8Array(d.buffer,d.byteOffset,d.byteLength):new Uint8Array(d);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+async function pickVideoCfg(){if(typeof VideoEncoder==='undefined'||typeof VideoFrame==='undefined')return null;
+ const br=W*H>1e6?8e6:4e6,lv=W*H>1e6?'28':'1f';
+ for(const codec of['avc1.4200'+lv,'avc1.42e0'+lv,'avc1.4d00'+lv,'avc1.6400'+lv,'avc1.420028','avc1.640028']){const c={codec,width:W,height:H,bitrate:br,framerate:30,avc:{format:'avc'}};
+  try{if((await VideoEncoder.isConfigSupported(c)).supported)return c}catch(e){}}return null}
+async function pickAudioCfg(sr){if(typeof AudioEncoder==='undefined'||typeof AudioData==='undefined')return null;
+ const c={codec:'mp4a.40.2',sampleRate:sr,numberOfChannels:2,bitrate:128000};try{if((await AudioEncoder.isConfigSupported(c)).supported)return c}catch(e){}return null}
+async function decodeFile(file){const C=window.AudioContext||window.webkitAudioContext;const tmp=new C();try{const d=await file.arrayBuffer();return await new Promise((r,j)=>{const p=tmp.decodeAudioData(d,r,j);if(p&&p.then)p.then(r,j)})}finally{tmp.close&&tmp.close()}}
+async function renderAudio(sr){const vs=$('#vidSnd').checked,vsegs=vs?segs.filter(s=>s.k==='m'&&s.item.type==='vid'):[];
+ if(!S.music&&!vsegs.length)return null;
+ const C=window.OfflineAudioContext||window.webkitOfflineAudioContext,len=Math.ceil(total*sr),ctx=new C(2,len,sr);let any=false;
+ if(S.music){try{if(!S.music.ab)S.music.ab=await decodeFile(S.music.file);const b=S.music.ab,src=ctx.createBufferSource(),g=ctx.createGain();src.buffer=b;src.loop=true;
+   const n=Math.max(2,Math.ceil(total*20)),curve=new Float32Array(n),vol=+V('vol');
+   for(let i=0;i<n;i++){const t=i/(n-1)*total;const duck=vsegs.some(s=>t>=s.st&&t<s.st+s.dur);curve[i]=vol*clamp(t/1.5)*clamp((total-t)/2.5)*(duck?.25:1)}
+   g.gain.setValueCurveAtTime(curve,0,total);src.connect(g);g.connect(ctx.destination);src.start(0,(+V('mStart')||0)%b.duration);any=true}catch(e){status('Müzik okunamadı; video müziksiz hazırlanıyor.')}}
+ for(const s of vsegs){try{if(!s.item.ab)s.item.ab=await decodeFile(s.item.file);const src=ctx.createBufferSource();src.buffer=s.item.ab;src.connect(ctx.destination);src.start(s.st,0,Math.min(s.dur,s.item.ab.duration));any=true}catch(e){}}
+ if(!any)return null;const r=ctx.startRendering();return r&&r.then?await r:await new Promise(ok=>ctx.oncomplete=e=>ok(e.renderedBuffer))}
+function seekTo(el,x){return new Promise(r=>{let d=0;const f=()=>{if(d)return;d=1;el.removeEventListener('seeked',f);r()};el.addEventListener('seeked',f);try{el.currentTime=x}catch(e){f()}setTimeout(f,2000)})}
+async function seekVideos(t){const ps=[];for(const s of segs){if(s.k!=='m'||s.item.type!=='vid')continue;if(t>=s.st&&t<s.st+s.dur){const el=s.item.el,x=Math.max(0,Math.min(t-s.st,s.item.max-.05));if(Math.abs(el.currentTime-x)>.004)ps.push(seekTo(el,x))}}if(ps.length)await Promise.all(ps)}
+
+let cancelExp=false,exporting=false;
+async function exportClip(){if(!S.items.length){status('Önce en az bir fotoğraf veya video ekleyebilirsiniz.');return}
+ build();const vcfg=await pickVideoCfg();if(!vcfg){recordRealtime();return}
+ const sr=44100;let abuf=null,acfg=null;
+ status('Ses hazırlanıyor…');try{abuf=await renderAudio(sr)}catch(e){abuf=null}
+ if(abuf){acfg=await pickAudioCfg(sr);if(!acfg){recordRealtime();return}}
+ cancelExp=false;exporting=true;playing=true;$('#bPlay').disabled=true;$('#bRec').disabled=true;$('#bStop').disabled=false;$('#result').classList.remove('on');getWake();
+ S.items.forEach(it=>it.type==='vid'&&(it.el.pause(),it.el.muted=true));if(S.music)S.music.el.pause();
+ const fps=30,N=Math.ceil(total*fps),v={chunks:[],durs:[],keys:[],w:W,h:H,ts:fps*1000,desc:null};let err=null;
+ const ve=new VideoEncoder({output:(c,m)=>{if(m&&m.decoderConfig&&m.decoderConfig.description&&!v.desc)v.desc=new Uint8Array(toU8(m.decoderConfig.description));const b=new Uint8Array(c.byteLength);c.copyTo(b);v.chunks.push(b);v.durs.push(1000);if(c.type==='key')v.keys.push(v.chunks.length)},error:e=>err=e});
+ ve.configure(vcfg);
+ try{for(let i=0;i<N;i++){if(cancelExp||err)break;const t=i/fps;await seekVideos(t);renderAt(Math.min(t,total-.001));
+   const fr=new VideoFrame(cv,{timestamp:Math.round(i*1e6/fps),duration:Math.round(1e6/fps)});ve.encode(fr,{keyFrame:i%60===0});fr.close();
+   while(ve.encodeQueueSize>3)await sleep(4);if(i%2===0){$('#pg').style.width=(i/N*100)+'%';status('Video hazırlanıyor… %'+Math.floor(i/N*100)+' (ekran kapanmasın)');await sleep(0)}}
+  if(!cancelExp&&!err)await ve.flush()}catch(e){err=e}
+ try{ve.close()}catch(e){}
+ let a=null;
+ if(!cancelExp&&!err&&abuf){status('Ses ekleniyor…');a={chunks:[],durs:[],ts:sr,sr,ch:2,br:128000,desc:null};
+  const ae=new AudioEncoder({output:(c,m)=>{if(m&&m.decoderConfig&&m.decoderConfig.description&&!a.desc)a.desc=new Uint8Array(toU8(m.decoderConfig.description));const b=new Uint8Array(c.byteLength);c.copyTo(b);a.chunks.push(b);a.durs.push(Math.max(1,Math.round((c.duration||(1024/sr*1e6))*sr/1e6)))},error:e=>err=e});
+  ae.configure(acfg);const L=abuf.length,c0=abuf.getChannelData(0),c1=abuf.numberOfChannels>1?abuf.getChannelData(1):c0;
+  for(let p=0;p<L&&!err;p+=4096){const n=Math.min(4096,L-p),d=new Float32Array(n*2);d.set(c0.subarray(p,p+n),0);d.set(c1.subarray(p,p+n),n);
+   const ad=new AudioData({format:'f32-planar',sampleRate:sr,numberOfFrames:n,numberOfChannels:2,timestamp:Math.round(p/sr*1e6),data:d});ae.encode(ad);ad.close();if(p%(4096*40)===0)await sleep(0)}
+  try{if(!err)await ae.flush();ae.close()}catch(e){err=err||e}
+  if(!a.desc){const idx=[96000,88200,64000,48000,44100,32000,24000,22050,16000].indexOf(sr);a.desc=u8((2<<3)|(idx>>1),((idx&1)<<7)|(2<<3))}}
+ exporting=false;playing=false;$('#bPlay').disabled=false;$('#bRec').disabled=false;$('#bStop').disabled=true;releaseWake();
+ if(cancelExp){$('#pg').style.width='0';status('Kayıt iptal edildi.');still();return}
+ if(err||!v.chunks.length||!v.desc){status('Bu yöntemle hazırlanamadı, canlı kayıt yöntemi deneniyor…');still();await sleep(300);recordRealtime();return}
+ $('#pg').style.width='100%';showResult(muxMP4(v,a,total),'video/mp4');still()}
 
 function status(t){$('#status').textContent=t}
 function still(){if(playing)return;build();document.fonts.ready.then(()=>{if(!playing)renderAt(Math.min(stillT,total||stillT))})}
@@ -410,7 +488,7 @@ function refresh(){stillT=2.2;still()}
 
 // --- medya
 async function addFiles(files){const arr=[...files];status('Dosyalar yükleniyor…');
- for(const f of arr){const url=URL.createObjectURL(f);const it={id:++uid,name:f.name,cap:'',url,date:f.lastModified||Date.now()};
+ for(const f of arr){const url=URL.createObjectURL(f);const it={id:++uid,name:f.name,cap:'',url,file:f,date:f.lastModified||Date.now()};
   try{if(f.type.startsWith('video')){const v=document.createElement('video');v.src=url;v.playsInline=true;v.muted=true;v.preload='auto';v.setAttribute('playsinline','');
     await new Promise((ok,no)=>{v.onloadeddata=ok;v.onerror=no;setTimeout(no,20000)});Object.assign(it,{type:'vid',rot:0,el:v,w:v.videoWidth,h:v.videoHeight,max:v.duration||10,dur:Math.min(v.duration||10,+V('vidMax'))});wireVid(it)}
    else{let im=new Image();im.src=url;await im.decode();const M=1600,mx=Math.max(im.naturalWidth,im.naturalHeight);
@@ -451,13 +529,13 @@ function toWav(ab){const ch=Math.min(2,ab.numberOfChannels),len=ab.length,sr=ab.
 $('#fMusic').addEventListener('change',async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;if(S.music)S.music.el.pause();
  const a=new Audio();a.preload='auto';$('#musicName').textContent='Yükleniyor: '+f.name+'…';
  let ok=(f.type&&f.type.startsWith('audio'))||/\.(mp3|m4a|aac|wav|flac|ogg|oga|opus|caf|aiff?|mp4|webm|amr)$/i.test(f.name)||f.type==='';
- if(ok)ok=await canPlay(a,URL.createObjectURL(f));
+ let conv=null;if(ok)ok=await canPlay(a,URL.createObjectURL(f));
  if(!ok){$('#musicName').textContent='Dönüştürülüyor: '+f.name+'…';
   try{const data=await f.arrayBuffer();const C=window.AudioContext||window.webkitAudioContext;const tmp=new C();
    const ab=await new Promise((r,j)=>{const p=tmp.decodeAudioData(data,r,j);if(p&&p.then)p.then(r,j)});tmp.close&&tmp.close();
-   ok=await canPlay(a,URL.createObjectURL(toWav(ab)))}catch(err){ok=false}}
+   conv=ab;ok=await canPlay(a,URL.createObjectURL(toWav(ab)))}catch(err){ok=false}}
  if(!ok){$('#musicName').innerHTML='<b>“'+esc(f.name)+'” bu telefonda çalınamıyor.</b> Dosyayı MP3 veya M4A biçimine çevirip tekrar deneyebilirsiniz (WhatsApp sesli mesajları .opus biçimindedir).';return}
- S.music={el:a,name:f.name,dur:a.duration};wireMusic();
+ S.music={el:a,name:f.name,dur:a.duration,file:f,ab:conv};wireMusic();
  $('#musicName').textContent='Seçilen: '+f.name+' ('+fmtT(a.duration)+')';$('#bNoMusic').hidden=false;$('#bFit').hidden=false;status('Müzik eklendi.')});
 $('#bNoMusic').addEventListener('click',()=>{if(S.music){S.music.el.pause();try{S.music.src&&S.music.src.disconnect()}catch(e){}}S.music=null;$('#musicName').textContent='Müzik seçilmedi (sessiz klip).';$('#bNoMusic').hidden=true;$('#bFit').hidden=true});
 $('#bFit').addEventListener('click',()=>{if(!S.music||!S.music.dur)return;const imgs=S.items.filter(i=>i.type==='img');if(!imgs.length){status('Süre uydurmak için en az bir fotoğraf gerekli.');return}
@@ -476,8 +554,8 @@ $('#arEnd').addEventListener('change',()=>{build();stillT=total-1;still()});
 $('#vidSnd').addEventListener('change',setVidSound);
 
 $('#bPlay').addEventListener('click',()=>{$('#result').classList.remove('on');if(start(false))status('Önizleme oynatılıyor…')});
-$('#bStop').addEventListener('click',()=>finish(true));
-$('#bRec').addEventListener('click',record);
+$('#bStop').addEventListener('click',()=>{if(exporting)cancelExp=true;else finish(true)});
+$('#bRec').addEventListener('click',exportClip);
 
 $('#bDemo').addEventListener('click',async()=>{const files=[],caps=['Hz. Hüseyin Türbesi','Hz. Abbas Türbesi','Beyne’l-Haremeyn'];
  for(let n=0;n<3;n++){const c=document.createElement('canvas');c.width=1080;c.height=1440;const g=c.getContext('2d');
