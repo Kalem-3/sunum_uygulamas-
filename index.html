@@ -438,16 +438,17 @@ async function pickVideoCfg(){if(typeof VideoEncoder==='undefined'||typeof Video
  const br=W*H>1e6?8e6:4e6,lv=W*H>1e6?'28':'1f';
  for(const codec of['avc1.4200'+lv,'avc1.42e0'+lv,'avc1.4d00'+lv,'avc1.6400'+lv,'avc1.420028','avc1.640028']){const c={codec,width:W,height:H,bitrate:br,framerate:30,avc:{format:'avc'}};
   try{if((await VideoEncoder.isConfigSupported(c)).supported)return c}catch(e){}}return null}
-async function pickAudioCfg(sr){if(typeof AudioEncoder==='undefined'||typeof AudioData==='undefined')return null;
- const c={codec:'mp4a.40.2',sampleRate:sr,numberOfChannels:2,bitrate:128000};try{if((await AudioEncoder.isConfigSupported(c)).supported)return c}catch(e){}return null}
+async function pickAudioCfg(){if(typeof AudioEncoder==='undefined'||typeof AudioData==='undefined')return null;
+ for(const sr of[48000,44100]){const c={codec:'mp4a.40.2',sampleRate:sr,numberOfChannels:2,bitrate:128000};try{if((await AudioEncoder.isConfigSupported(c)).supported)return c}catch(e){}}return null}
 async function decodeFile(file){const C=window.AudioContext||window.webkitAudioContext;const tmp=new C();try{const d=await file.arrayBuffer();return await new Promise((r,j)=>{const p=tmp.decodeAudioData(d,r,j);if(p&&p.then)p.then(r,j)})}finally{tmp.close&&tmp.close()}}
 async function renderAudio(sr){const vs=$('#vidSnd').checked,vsegs=vs?segs.filter(s=>s.k==='m'&&s.item.type==='vid'):[];
- if(!S.music&&!vsegs.length)return null;
+ if(!S.music&&!vsegs.length)return null;let musicOK=!S.music;
  const C=window.OfflineAudioContext||window.webkitOfflineAudioContext,len=Math.ceil(total*sr),ctx=new C(2,len,sr);let any=false;
  if(S.music){try{if(!S.music.ab)S.music.ab=await decodeFile(S.music.file);const b=S.music.ab,src=ctx.createBufferSource(),g=ctx.createGain();src.buffer=b;src.loop=true;
    const n=Math.max(2,Math.ceil(total*20)),curve=new Float32Array(n),vol=+V('vol');
    for(let i=0;i<n;i++){const t=i/(n-1)*total;const duck=vsegs.some(s=>t>=s.st&&t<s.st+s.dur);curve[i]=vol*clamp(t/1.5)*clamp((total-t)/2.5)*(duck?.25:1)}
-   g.gain.setValueCurveAtTime(curve,0,total);src.connect(g);g.connect(ctx.destination);src.start(0,(+V('mStart')||0)%b.duration);any=true}catch(e){status('Müzik okunamadı; video müziksiz hazırlanıyor.')}}
+   g.gain.setValueCurveAtTime(curve,0,total);src.connect(g);g.connect(ctx.destination);src.start(0,(+V('mStart')||0)%b.duration);any=true;musicOK=true}catch(e){}}
+ if(!musicOK)throw new Error('music');
  for(const s of vsegs){try{if(!s.item.ab)s.item.ab=await decodeFile(s.item.file);const src=ctx.createBufferSource();src.buffer=s.item.ab;src.connect(ctx.destination);src.start(s.st,0,Math.min(s.dur,s.item.ab.duration));any=true}catch(e){}}
  if(!any)return null;const r=ctx.startRendering();return r&&r.then?await r:await new Promise(ok=>ctx.oncomplete=e=>ok(e.renderedBuffer))}
 function seekTo(el,x){return new Promise(r=>{let d=0;const f=()=>{if(d)return;d=1;el.removeEventListener('seeked',f);r()};el.addEventListener('seeked',f);try{el.currentTime=x}catch(e){f()}setTimeout(f,2000)})}
@@ -456,9 +457,10 @@ async function seekVideos(t){const ps=[];for(const s of segs){if(s.k!=='m'||s.it
 let cancelExp=false,exporting=false;
 async function exportClip(){if(!S.items.length){status('Önce en az bir fotoğraf veya video ekleyebilirsiniz.');return}
  build();const vcfg=await pickVideoCfg();if(!vcfg){recordRealtime();return}
- const sr=44100;let abuf=null,acfg=null;
- status('Ses hazırlanıyor…');try{abuf=await renderAudio(sr)}catch(e){abuf=null}
- if(abuf){acfg=await pickAudioCfg(sr);if(!acfg){recordRealtime();return}}
+ const needA=!!S.music||($('#vidSnd').checked&&S.items.some(i=>i.type==='vid'));let abuf=null,acfg=null,sr=48000;
+ if(needA){acfg=await pickAudioCfg();if(!acfg){status('Bu cihazda müzik kare kare eklenemiyor; canlı kayıt yöntemi kullanılıyor…');await sleep(600);recordRealtime();return}
+  sr=acfg.sampleRate;status('Ses hazırlanıyor…');try{abuf=await renderAudio(sr)}catch(e){abuf=null}
+  if(!abuf&&S.music){status('Müzik dosyası okunamadı; canlı kayıt yöntemi kullanılıyor…');await sleep(600);recordRealtime();return}}
  cancelExp=false;exporting=true;playing=true;$('#bPlay').disabled=true;$('#bRec').disabled=true;$('#bStop').disabled=false;$('#result').classList.remove('on');getWake();
  S.items.forEach(it=>it.type==='vid'&&(it.el.pause(),it.el.muted=true));if(S.music)S.music.el.pause();
  const fps=30,N=Math.ceil(total*fps),v={chunks:[],durs:[],keys:[],w:W,h:H,ts:fps*1000,desc:null};let err=null;
@@ -480,7 +482,8 @@ async function exportClip(){if(!S.items.length){status('Önce en az bir fotoğra
  exporting=false;playing=false;$('#bPlay').disabled=false;$('#bRec').disabled=false;$('#bStop').disabled=true;releaseWake();
  if(cancelExp){$('#pg').style.width='0';status('Kayıt iptal edildi.');still();return}
  if(err||!v.chunks.length||!v.desc){status('Bu yöntemle hazırlanamadı, canlı kayıt yöntemi deneniyor…');still();await sleep(300);recordRealtime();return}
- $('#pg').style.width='100%';showResult(muxMP4(v,a,total),'video/mp4');still()}
+ if(abuf&&(!a||!a.chunks.length)){status('Ses eklenemedi; canlı kayıt yöntemi deneniyor…');still();await sleep(600);recordRealtime();return}
+ $('#pg').style.width='100%';showResult(muxMP4(v,a,total),'video/mp4');status(a?'Video hazır (müzikli). Aşağıdan izleyip indirebilir veya paylaşabilirsiniz.':'Video hazır (sessiz). Aşağıdan izleyip indirebilir veya paylaşabilirsiniz.');still()}
 
 function status(t){$('#status').textContent=t}
 function still(){if(playing)return;build();document.fonts.ready.then(()=>{if(!playing)renderAt(Math.min(stillT,total||stillT))})}
@@ -555,7 +558,10 @@ $('#vidSnd').addEventListener('change',setVidSound);
 
 $('#bPlay').addEventListener('click',()=>{$('#result').classList.remove('on');if(start(false))status('Önizleme oynatılıyor…')});
 $('#bStop').addEventListener('click',()=>{if(exporting)cancelExp=true;else finish(true)});
-$('#bRec').addEventListener('click',exportClip);
+function unlockAudio(){ensureAudio();try{AC&&AC.resume()}catch(e){}
+ const un=el=>{if(!el)return;const m=el.muted;el.muted=true;const p=el.play();if(p&&p.then)p.then(()=>{if(!playing)el.pause();el.muted=m}).catch(()=>{el.muted=m});else{el.pause();el.muted=m}};
+ if(S.music)un(S.music.el);S.items.forEach(it=>it.type==='vid'&&un(it.el))}
+$('#bRec').addEventListener('click',()=>{unlockAudio();exportClip()});
 
 $('#bDemo').addEventListener('click',async()=>{const files=[],caps=['Hz. Hüseyin Türbesi','Hz. Abbas Türbesi','Beyne’l-Haremeyn'];
  for(let n=0;n<3;n++){const c=document.createElement('canvas');c.width=1080;c.height=1440;const g=c.getContext('2d');
